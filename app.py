@@ -1,6 +1,7 @@
 from Provider import *
 from flask import request, jsonify, Flask
 from functools import wraps
+import threading
 import time
 import uuid
 import json
@@ -185,12 +186,21 @@ def chat_completions():
             "is_byok": False
         }
     })
+    
+@app.route("/")
+def home():
+    return "Server is alive"
 
-# =======================
-# RUN SERVER
-# =======================
+def background_worker():
+    while True:
+        print("Background worker alive...")
+        time.sleep(60)  # sleep 60 seconds
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=7860, debug=False)
+    t = threading.Thread(target=background_worker, daemon=True)
+    t.start()
+
+    app.run(host="0.0.0.0", port=7860)
 
 
 
