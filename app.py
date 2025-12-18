@@ -1,5 +1,5 @@
 from Provider import *
-from flask import request, jsonify, Flask, Response
+from flask import Flask, request, jsonify, Response
 from functools import wraps
 import threading
 import time
@@ -10,7 +10,7 @@ import requests
 app = Flask(__name__)
 
 # =======================
-# SIMPLE API KEY STORE
+# API KEYS
 # =======================
 VALID_API_KEYS = {
     "sk-apinow-tbfgenrated1": {"user": "demo"},
@@ -54,7 +54,7 @@ def require_api_key(f):
 # =======================
 # MODELS ENDPOINT
 # =======================
-@app.route('/models', methods=['GET'])
+@app.route("/models", methods=["GET"])
 def get_models():
     all_models = []
     for _, models in provider_and_models.items():
@@ -64,7 +64,7 @@ def get_models():
 # =======================
 # CHAT COMPLETIONS
 # =======================
-@app.route('/v1/chat/completions', methods=['POST'])
+@app.route("/v1/chat/completions", methods=["POST"])
 @require_api_key
 def chat_completions():
     data = request.get_json(silent=True) or {}
@@ -74,13 +74,15 @@ def chat_completions():
     stream = data.get("stream", False)
     max_tokens = data.get("max_tokens", 2048)
 
+    if not model_name:
+        return jsonify({"error": "Model is required"}), 400
+
     try:
         provider = make_workable(model_name)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
     SUPPORTED_PROVIDERS = (Qwen3VL, Qwen3Omni, Coherelabs, gpt_oss_120b)
-
     if not isinstance(provider, SUPPORTED_PROVIDERS):
         return jsonify({"error": "Provider not supported yet"}), 400
 
@@ -99,44 +101,45 @@ def chat_completions():
         created = int(time.time())
 
         def generate():
-            # Initial role chunk
-            yield f"data: {json.dumps({ 
-                'id': completion_id,
-                'object': 'chat.completion.chunk',
-                'created': created,
-                'model': model_name,
-                'choices': [{
-                    'index': 0,
-                    'delta': {'role': 'assistant'},
-                    'finish_reason': None
+            role_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": None
                 }]
-            })}\n\n"
+            }
+            yield f"data: {json.dumps(role_chunk)}\n\n"
 
             for token in response:
-                yield f"data: {json.dumps({
-                    'id': completion_id,
-                    'object': 'chat.completion.chunk',
-                    'created': created,
-                    'model': model_name,
-                    'choices': [{
-                        'index': 0,
-                        'delta': {'content': token},
-                        'finish_reason': None
+                token_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": token},
+                        "finish_reason": None
                     }]
-                })}\n\n"
+                }
+                yield f"data: {json.dumps(token_chunk)}\n\n"
 
-            yield f"data: {json.dumps({
-                'id': completion_id,
-                'object': 'chat.completion.chunk',
-                'created': created,
-                'model': model_name,
-                'choices': [{
-                    'index': 0,
-                    'delta': {},
-                    'finish_reason': 'stop'
+            end_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
                 }]
-            })}\n\n"
-
+            }
+            yield f"data: {json.dumps(end_chunk)}\n\n"
             yield "data: [DONE]\n\n"
 
         return Response(
@@ -182,10 +185,10 @@ def home():
     return "Server is alive"
 
 # =======================
-# HF KEEP-ALIVE WORKER
+# HF KEEP ALIVE
 # =======================
 SERVERS = ["https://techbitforge-m.hf.space/"]
-PING_INTERVAL = 60  # seconds
+PING_INTERVAL = 60
 HEADERS = {"User-Agent": "HF-KeepAlive"}
 
 def background_worker():
