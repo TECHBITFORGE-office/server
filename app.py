@@ -191,16 +191,28 @@ def chat_completions():
 def home():
     return "Server is alive"
 
+SERVERS = ["https://techbitforge-m.hf.space/"]
+
 def background_worker():
+    """Background thread to ping HF servers"""
     while True:
-        print("Background worker alive...")
-        time.sleep(60)  # sleep 60 seconds
+        print("🔄 Pinging servers...")
+        for url in SERVERS:
+            try:
+                r = requests.get(url, headers=HEADERS, timeout=10)
+                print(f"{url} → {r.status_code}")
+                print(r.json())
+            except Exception as e:
+                print(f"{url} → ERROR: {e}")
+        print("✅ Cycle complete\n")
+        time.sleep(PING_INTERVAL)
 
 if __name__ == "__main__":
     t = threading.Thread(target=background_worker, daemon=True)
     t.start()
 
     app.run(host="0.0.0.0", port=7860)
+
 
 
 
