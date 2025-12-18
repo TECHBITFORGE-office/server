@@ -1,10 +1,11 @@
 from Provider import *
-from flask import request, jsonify, Flask
+from flask import request, jsonify, Flask, Response
 from functools import wraps
 import threading
 import time
 import uuid
 import json
+import requests
 
 app = Flask(__name__)
 
@@ -18,7 +19,6 @@ VALID_API_KEYS = {
 
 def verify_api_key(key: str):
     return VALID_API_KEYS.get(key)
-
 
 # =======================
 # AUTH DECORATOR
@@ -51,17 +51,15 @@ def require_api_key(f):
         return f(*args, **kwargs)
     return decorated
 
-
 # =======================
 # MODELS ENDPOINT
 # =======================
 @app.route('/models', methods=['GET'])
 def get_models():
     all_models = []
-    for provider_name, models in provider_and_models.items():
+    for _, models in provider_and_models.items():
         all_models.extend(models)
     return jsonify(all_models)
-
 
 # =======================
 # CHAT COMPLETIONS
@@ -69,20 +67,22 @@ def get_models():
 @app.route('/v1/chat/completions', methods=['POST'])
 @require_api_key
 def chat_completions():
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
 
-    model_name = data.get('model')
-    messages = data.get('messages', [])
-    stream = data.get('stream', False)
-    max_tokens = data.get('max_tokens', 2048)
+    model_name = data.get("model")
+    messages = data.get("messages", [])
+    stream = data.get("stream", False)
+    max_tokens = data.get("max_tokens", 2048)
 
     try:
         provider = make_workable(model_name)
-    except ValueError as e:
+    except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-    if not isinstance(provider, (Qwen3VL, Qwen3Omni, Coherelabs, gpt_oss_120b)):
-        return jsonify({"error": "Provider not supported yet."}), 400
+    SUPPORTED_PROVIDERS = (Qwen3VL, Qwen3Omni, Coherelabs, gpt_oss_120b)
+
+    if not isinstance(provider, SUPPORTED_PROVIDERS):
+        return jsonify({"error": "Provider not supported yet"}), 400
 
     response = provider.create(
         message=messages,
@@ -99,120 +99,110 @@ def chat_completions():
         created = int(time.time())
 
         def generate():
-            # role chunk
-            role_chunk = {
-                "id": completion_id,
-                "model": model_name,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"role": "assistant"},
-                    "finish_reason": None,
-                    "native_finish_reason": None,
-                    "logprobs": None
+            # Initial role chunk
+            yield f"data: {json.dumps({ 
+                'id': completion_id,
+                'object': 'chat.completion.chunk',
+                'created': created,
+                'model': model_name,
+                'choices': [{
+                    'index': 0,
+                    'delta': {'role': 'assistant'},
+                    'finish_reason': None
                 }]
-            }
-            yield f"data: {json.dumps(role_chunk)}\n\n"
+            })}\n\n"
 
-            # token chunks
             for token in response:
-                token_chunk = {
-                    "id": completion_id,
-                    "model": model_name,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": token},
-                        "finish_reason": None,
-                        "native_finish_reason": None,
-                        "logprobs": None
+                yield f"data: {json.dumps({
+                    'id': completion_id,
+                    'object': 'chat.completion.chunk',
+                    'created': created,
+                    'model': model_name,
+                    'choices': [{
+                        'index': 0,
+                        'delta': {'content': token},
+                        'finish_reason': None
                     }]
-                }
-                yield f"data: {json.dumps(token_chunk)}\n\n"
+                })}\n\n"
 
-            # end chunk
-            end_chunk = {
-                "id": completion_id,
-                "model": model_name,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "choices": [{
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "stop",
-                    "native_finish_reason": "stop",
-                    "logprobs": None
+            yield f"data: {json.dumps({
+                'id': completion_id,
+                'object': 'chat.completion.chunk',
+                'created': created,
+                'model': model_name,
+                'choices': [{
+                    'index': 0,
+                    'delta': {},
+                    'finish_reason': 'stop'
                 }]
-            }
-            yield f"data: {json.dumps(end_chunk)}\n\n"
+            })}\n\n"
+
             yield "data: [DONE]\n\n"
 
-        return app.response_class(
+        return Response(
             generate(),
-            mimetype="text/event-stream"
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no"
+            }
         )
 
     # =======================
     # NON-STREAM RESPONSE
     # =======================
     assistant_text = response if isinstance(response, str) else str(response)
-    completion_id = f"gen-{int(time.time())}-{uuid.uuid4().hex[:20]}"
-    created = int(time.time())
 
     return jsonify({
-        "id": completion_id,
-        "model": model_name,
+        "id": f"gen-{int(time.time())}-{uuid.uuid4().hex[:20]}",
         "object": "chat.completion",
-        "created": created,
+        "created": int(time.time()),
+        "model": model_name,
         "choices": [{
             "index": 0,
             "message": {
                 "role": "assistant",
-                "content": assistant_text,
-                "refusal": None,
-                "reasoning": None
+                "content": assistant_text
             },
-            "logprobs": None,
-            "finish_reason": "stop",
-            "native_finish_reason": "stop"
+            "finish_reason": "stop"
         }],
         "usage": {
             "prompt_tokens": sum(len(m.get("content", "").split()) for m in messages),
             "completion_tokens": len(assistant_text.split()),
             "total_tokens": sum(len(m.get("content", "").split()) for m in messages) + len(assistant_text.split()),
-            "cost": 0,
-            "is_byok": False
+            "cost": 0
         }
     })
-    
+
+# =======================
+# HEALTH CHECK
+# =======================
 @app.route("/")
 def home():
     return "Server is alive"
 
+# =======================
+# HF KEEP-ALIVE WORKER
+# =======================
 SERVERS = ["https://techbitforge-m.hf.space/"]
+PING_INTERVAL = 60  # seconds
+HEADERS = {"User-Agent": "HF-KeepAlive"}
 
 def background_worker():
-    """Background thread to ping HF servers"""
     while True:
         print("🔄 Pinging servers...")
         for url in SERVERS:
             try:
                 r = requests.get(url, headers=HEADERS, timeout=10)
                 print(f"{url} → {r.status_code}")
-                print(r.json())
             except Exception as e:
                 print(f"{url} → ERROR: {e}")
         print("✅ Cycle complete\n")
         time.sleep(PING_INTERVAL)
 
+# =======================
+# MAIN
+# =======================
 if __name__ == "__main__":
-    t = threading.Thread(target=background_worker, daemon=True)
-    t.start()
-
+    threading.Thread(target=background_worker, daemon=True).start()
     app.run(host="0.0.0.0", port=7860)
-
-
-
-
